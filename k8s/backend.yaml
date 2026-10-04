@@ -1,0 +1,29 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: pedaree-backend
+  labels:
+    app: pedaree-backend
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: pedaree-backend
+  template:
+    metadata:
+      labels:
+        app: pedaree-backend
+    spec:
+      containers:
+        - name: backend
+          image: ghcr.io/coding-skuy/pedaree-backend-service:0.1.0
+          ports:
+            - containerPort: 8080
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef: { name: pedaree-db, key: url }
+            - name: PAWONEE_RECIPE_API
+              value: https://api-pengembangan.pawonee.example.id
+          readinessProbe:
+            httpGet: { path: /kesehatan, port: 8080 }
