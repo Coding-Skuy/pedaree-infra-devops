@@ -1,0 +1,128 @@
+# QA gate lintas repo Pedaree (PDR-OPS-002; SRS QA-001..QA-003).
+# Mengambil tiap repo app, menjalankan build/uji, dan menghasilkan satu job `gerbang`
+# yang merah bila ada satu pun yang gagal. Workflow rilis memakainya lewat `needs`
+# sehingga build/uji merah memblokir rilis (QA-002).
+name: qa-gate
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref_backend:  { description: "ref pedaree-backend-service", default: main, type: string }
+      ref_web:      { description: "ref pedaree-web", default: main, type: string }
+      ref_app:      { description: "ref pedaree-app-kmp", default: main, type: string }
+      ref_ai:       { description: "ref pedaree-ai-models", default: main, type: string }
+      ref_pipeline: { description: "ref pedaree-data-pipeline", default: main, type: string }
+  workflow_call:
+    inputs:
+      ref_backend:  { default: main, type: string }
+      ref_web:      { default: main, type: string }
+      ref_app:      { default: main, type: string }
+      ref_ai:       { default: main, type: string }
+      ref_pipeline: { default: main, type: string }
+    secrets:
+      CI_REPO_TOKEN:
+        description: "PAT/GitHub App token baca-saja (contents:read) untuk repo pedaree-*"
+        required: true
+  schedule:
+    - cron: "0 23 * * *" # 06:00 WIB, memantau regresi harian
+
+permissions:
+  contents: read
+
+concurrency:
+  group: qa-gate-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  ORG: Coding-Skuy
+
+jobs:
+  backend:
+    name: backend (cargo)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4.2.2
+        with:
+          repository: ${{ env.ORG }}/pedaree-backend-service
+          ref: ${{ inputs.ref_backend || 'main' }}
+          token: ${{ secrets.CI_REPO_TOKEN }}
+      - uses: dtolnay/rust-toolchain@stable
+        with: { components: "rustfmt, clippy" }
+      - uses: Swatinem/rust-cache@v2.7.7
+      - run: cargo fmt --check
+      - run: cargo clippy --all-targets -- -D warnings
+      - run: cargo test --all-targets
+
+  web:
+    name: web (bun)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4.2.2
+        with:
+          repository: ${{ env.ORG }}/pedaree-web
+          ref: ${{ inputs.ref_web || 'main' }}
+          token: ${{ secrets.CI_REPO_TOKEN }}
+      - uses: oven-sh/setup-bun@v2.0.1
+        with: { bun-version: "1.2.2" }
+      - run: bun install
+      # Skrip `check` ada setelah migrasi SvelteKit (PDR-WEB-002); sebelum itu langkah ini gagal terang-terangan.
+      - run: bun run check
+      - run: bun test
+
+  app-kmp:
+    name: app-kmp (APK debug)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4.2.2
+        with:
+          repository: ${{ env.ORG }}/pedaree-app-kmp
+          ref: ${{ inputs.ref_app || 'main' }}
+          token: ${{ secrets.CI_REPO_TOKEN }}
+      - uses: actions/setup-java@v4.7.0
+        with: { distribution: temurin, java-version: "17" }
+      - uses: gradle/actions/setup-gradle@v4.2.2
+      - run: ./gradlew :composeApp:testDebugUnitTest :composeApp:assembleDebug --no-daemon
+      - uses: actions/upload-artifact@v4.6.0
+        with:
+          name: apk-debug
+          path: composeApp/build/outputs/apk/debug/*.apk
+          if-no-files-found: error
+          retention-days: 7
+
+  python:
+    name: pytest (${{ matrix.repo }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { repo: pedaree-ai-models, ref: ai }
+          - { repo: pedaree-data-pipeline, ref: pipeline }
+    steps:
+      - uses: actions/checkout@v4.2.2
+        with:
+          repository: ${{ env.ORG }}/${{ matrix.repo }}
+          ref: ${{ (matrix.ref == 'ai' && inputs.ref_ai) || inputs.ref_pipeline || 'main' }}
+          token: ${{ secrets.CI_REPO_TOKEN }}
+      - uses: actions/setup-python@v5.3.0
+        with: { python-version: "3.12.8", cache: pip }
+      - run: pip install -r requirements.txt pytest
+      - run: python -m pytest -q
+
+  gerbang:
+    name: gerbang QA (QA-002)
+    if: always()
+    needs: [backend, web, app-kmp, python]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Semua job wajib hijau
+        run: |
+          echo '${{ toJSON(needs) }}'
+          if [ "${{ contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') || contains(needs.*.result, 'skipped') }}" = "true" ]; then
+            echo "QA gate MERAH: rilis diblokir." >&2
+            exit 1
+          fi
