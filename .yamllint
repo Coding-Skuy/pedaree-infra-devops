@@ -1,0 +1,7 @@
+extends: relaxed
+rules:
+  line-length: disable
+  truthy:
+    check-keys: false
+  colons:
+    max-spaces-after: -1
