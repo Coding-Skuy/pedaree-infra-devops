@@ -3,3 +3,9 @@
 .terraform.lock.hcl
 .env
 .DS_Store
+graphify-out/
+.env.*
+!.env.example
+*.pem
+*.key
+terraform/*.auto.tfvars

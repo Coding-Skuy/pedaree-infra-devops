@@ -1,0 +1,44 @@
+# Job expiry-sweep: setiap hari 06:00 WIB (BRD 20 BR-202).
+# timeZone memakai nama IANA (k8s >= 1.27); jadwal tidak bergantung zona waktu node.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: pedaree-expiry-sweep
+  labels:
+    app: pedaree-expiry-sweep
+spec:
+  schedule: "0 6 * * *"
+  timeZone: Asia/Jakarta
+  concurrencyPolicy: Forbid
+  startingDeadlineSeconds: 3600
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 5
+  jobTemplate:
+    spec:
+      backoffLimit: 2
+      activeDeadlineSeconds: 900
+      template:
+        metadata:
+          labels:
+            app: pedaree-expiry-sweep
+        spec:
+          restartPolicy: Never
+          containers:
+            - name: expiry-sweep
+              image: ghcr.io/coding-skuy/pedaree-backend-service:0.1.0
+              # ASUMSI: backend menyediakan subperintah `expiry-sweep` (belum ada di main,
+              # lihat PR). Kontrak ini perlu dikonfirmasi lewat PDR-BE-* sebelum produksi.
+              args: ["expiry-sweep"]
+              env:
+                - name: DATABASE_URL
+                  valueFrom:
+                    secretKeyRef: { name: pedaree-db, key: url }
+                - name: TITIPO_SERVICE_KEY
+                  valueFrom:
+                    secretKeyRef: { name: pedaree-titipo, key: service-key }
+                - name: TITIPO_BASE_URL
+                  valueFrom:
+                    configMapKeyRef: { name: pedaree-config, key: TITIPO_BASE_URL }
+              resources:
+                requests: { cpu: 50m, memory: 64Mi }
+                limits: { cpu: 250m, memory: 256Mi }

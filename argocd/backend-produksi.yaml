@@ -1,15 +1,16 @@
 apiVersion: argoproj.io/v1alpha1
 kind: Application
 metadata:
-  name: pedaree-backend
+  name: pedaree-backend-produksi
+  namespace: argocd
 spec:
   project: default
   source:
     repoURL: https://github.com/Coding-Skuy/pedaree-infra-devops.git
-    path: k8s
+    path: k8s/overlays/produksi
     targetRevision: main
   destination:
     server: https://kubernetes.default.svc
-    namespace: pedaree
+    namespace: pedaree-produksi
   syncPolicy:
-    automated: { prune: true, selfHeal: true }
+    syncOptions: [CreateNamespace=true]

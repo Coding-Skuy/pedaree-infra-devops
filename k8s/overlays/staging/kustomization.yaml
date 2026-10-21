@@ -1,0 +1,14 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: pedaree-staging
+resources:
+  - ../../base
+# Nilai non-rahasia per env. ASUMSI host: mengikuti pola api.<app>.chefgenie.id
+# (api.pedaree.chefgenie.id sudah terkunci); host resmi Pawonee/TitipO perlu dikonfirmasi.
+configMapGenerator:
+  - name: pedaree-config
+    literals:
+      - PAWONEE_RECIPE_API=https://api-staging.pawonee.chefgenie.id/v1
+      - TITIPO_BASE_URL=https://api-staging.titipo.chefgenie.id/v1
+generatorOptions:
+  disableNameSuffixHash: true
