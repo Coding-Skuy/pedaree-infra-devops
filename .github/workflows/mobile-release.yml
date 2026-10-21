@@ -1,0 +1,185 @@
+# Jalur rilis mobile Pedaree (PDR-OPS-004): APK sideload + AAB Play Store (track internal) + TestFlight.
+# Tidak ada target Windows (MSIX/EXE) untuk Pedaree; job `tanpa-windows` menegakkannya.
+# Dipicu tag `mobile-vX.Y.Z` atau manual. QA gate (QA-002) wajib hijau lebih dulu.
+name: mobile-release
+
+on:
+  push:
+    tags: ["mobile-v*"]
+  workflow_dispatch:
+    inputs:
+      ref_app:
+        description: "ref pedaree-app-kmp yang dirilis"
+        default: main
+        type: string
+      kirim_play:
+        description: "Unggah AAB ke Play Store (internal)"
+        default: false
+        type: boolean
+      kirim_testflight:
+        description: "Unggah IPA ke TestFlight"
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+concurrency:
+  group: mobile-release
+  cancel-in-progress: false
+
+env:
+  ORG: Coding-Skuy
+  # ASUMSI: id aplikasi mengikuti paket Kotlin `com.pedaree`; sesuaikan dengan composeApp.
+  PACKAGE_NAME: com.pedaree.app
+  # ASUMSI: proyek Xcode KMP standar `iosApp/iosApp.xcodeproj`, skema `iosApp`.
+  IOS_PROJECT: iosApp/iosApp.xcodeproj
+  IOS_SCHEME: iosApp
+
+jobs:
+  qa:
+    uses: ./.github/workflows/qa-gate.yml
+    with:
+      ref_app: ${{ inputs.ref_app || 'main' }}
+    secrets: inherit
+
+  android:
+    name: android (APK + AAB)
+    needs: qa
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    environment: rilis-mobile
+    steps:
+      - uses: actions/checkout@v4.2.2
+        with:
+          repository: ${{ env.ORG }}/pedaree-app-kmp
+          ref: ${{ inputs.ref_app || 'main' }}
+          token: ${{ secrets.CI_REPO_TOKEN }}
+      - uses: actions/setup-java@v4.7.0
+        with: { distribution: temurin, java-version: "17" }
+      - uses: gradle/actions/setup-gradle@v4.2.2
+      - name: Siapkan keystore (dari secret, tidak disimpan di repo)
+        env:
+          KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+        run: |
+          echo "$KEYSTORE_B64" | base64 --decode > "$RUNNER_TEMP/rilis.jks"
+          echo "KEYSTORE_PATH=$RUNNER_TEMP/rilis.jks" >> "$GITHUB_ENV"
+      - name: Bangun APK dan AAB bertanda tangan
+        env:
+          KS_PASS: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          KEY_PASS: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          ./gradlew :composeApp:assembleRelease :composeApp:bundleRelease --no-daemon \
+            -Pandroid.injected.signing.store.file="$KEYSTORE_PATH" \
+            -Pandroid.injected.signing.store.password="$KS_PASS" \
+            -Pandroid.injected.signing.key.alias="$KEY_ALIAS" \
+            -Pandroid.injected.signing.key.password="$KEY_PASS"
+      - uses: actions/upload-artifact@v4.6.0
+        with:
+          name: android-rilis
+          path: |
+            composeApp/build/outputs/apk/release/*.apk
+            composeApp/build/outputs/bundle/release/*.aab
+          if-no-files-found: error
+          retention-days: 30
+      - name: Unggah AAB ke Play Store (track internal)
+        if: github.event_name == 'push' || inputs.kirim_play
+        uses: r0adkll/upload-google-play@v1.1.3
+        with:
+          serviceAccountJsonPlainText: ${{ secrets.PLAY_SERVICE_ACCOUNT_JSON }}
+          packageName: ${{ env.PACKAGE_NAME }}
+          releaseFiles: composeApp/build/outputs/bundle/release/*.aab
+          track: internal
+          status: draft
+
+  ios:
+    name: ios (TestFlight)
+    needs: qa
+    runs-on: macos-15
+    timeout-minutes: 60
+    environment: rilis-mobile
+    steps:
+      - uses: actions/checkout@v4.2.2
+        with:
+          repository: ${{ env.ORG }}/pedaree-app-kmp
+          ref: ${{ inputs.ref_app || 'main' }}
+          token: ${{ secrets.CI_REPO_TOKEN }}
+      - uses: actions/setup-java@v4.7.0
+        with: { distribution: temurin, java-version: "17" }
+      - uses: gradle/actions/setup-gradle@v4.2.2
+      - name: Impor sertifikat dan profil provisioning
+        env:
+          CERT_B64: ${{ secrets.IOS_CERT_P12_BASE64 }}
+          CERT_PASS: ${{ secrets.IOS_CERT_PASSWORD }}
+          PROFILE_B64: ${{ secrets.IOS_PROVISION_PROFILE_BASE64 }}
+        run: |
+          KC="$RUNNER_TEMP/rilis.keychain-db"; KC_PASS="$(uuidgen)"
+          security create-keychain -p "$KC_PASS" "$KC"
+          security set-keychain-settings -lut 21600 "$KC"
+          security unlock-keychain -p "$KC_PASS" "$KC"
+          echo "$CERT_B64" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+          security import "$RUNNER_TEMP/cert.p12" -P "$CERT_PASS" -A -t cert -f pkcs12 -k "$KC"
+          security set-key-partition-list -S apple-tool:,apple: -k "$KC_PASS" "$KC"
+          security list-keychains -d user -s "$KC" login.keychain
+          mkdir -p "$HOME/Library/MobileDevice/Provisioning Profiles"
+          echo "$PROFILE_B64" | base64 --decode > "$HOME/Library/MobileDevice/Provisioning Profiles/pedaree.mobileprovision"
+      - name: Arsip dan ekspor IPA
+        run: |
+          xcodebuild -project "$IOS_PROJECT" -scheme "$IOS_SCHEME" -configuration Release \
+            -destination 'generic/platform=iOS' -archivePath "$RUNNER_TEMP/Pedaree.xcarchive" archive
+          xcodebuild -exportArchive -archivePath "$RUNNER_TEMP/Pedaree.xcarchive" \
+            -exportOptionsPlist iosApp/ExportOptions.plist -exportPath "$RUNNER_TEMP/ipa"
+          mkdir -p ipa && cp "$RUNNER_TEMP"/ipa/*.ipa ipa/
+      - uses: actions/upload-artifact@v4.6.0
+        with:
+          name: ios-ipa
+          path: ipa/*.ipa
+          if-no-files-found: error
+          retention-days: 30
+      - name: Unggah ke TestFlight
+        if: github.event_name == 'push' || inputs.kirim_testflight
+        env:
+          KEY_ID: ${{ secrets.APPSTORE_KEY_ID }}
+          ISSUER_ID: ${{ secrets.APPSTORE_ISSUER_ID }}
+          API_KEY_P8: ${{ secrets.APPSTORE_API_KEY_P8 }}
+        run: |
+          mkdir -p "$HOME/.appstoreconnect/private_keys"
+          echo "$API_KEY_P8" > "$HOME/.appstoreconnect/private_keys/AuthKey_${KEY_ID}.p8"
+          xcrun altool --upload-app --type ios --file ipa/*.ipa --apiKey "$KEY_ID" --apiIssuer "$ISSUER_ID"
+          rm -f "$HOME/.appstoreconnect/private_keys/AuthKey_${KEY_ID}.p8"
+
+  tanpa-windows:
+    name: tanpa artefak Windows
+    needs: [android, ios]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4.1.8
+        with: { path: artefak }
+      - name: Tolak MSIX/EXE/MSI
+        run: |
+          if find artefak -type f \( -iname '*.msix' -o -iname '*.exe' -o -iname '*.msi' \) | grep -q .; then
+            echo "Artefak Windows terdeteksi: tidak berlaku untuk Pedaree." >&2
+            exit 1
+          fi
+          echo "OK: hanya APK, AAB, dan IPA."
+
+  rilis-github:
+    name: GitHub Release (APK sideload)
+    if: github.ref_type == 'tag'
+    needs: tanpa-windows
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4.1.8
+        with: { name: android-rilis, path: artefak }
+      - name: Buat rilis dengan APK
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mapfile -t APK < <(find artefak -type f -name '*.apk')
+          [ "${#APK[@]}" -gt 0 ] || { echo "APK tidak ditemukan" >&2; exit 1; }
+          gh release create "$GITHUB_REF_NAME" "${APK[@]}" --repo "$GITHUB_REPOSITORY" \
+            --title "$GITHUB_REF_NAME" --prerelease \
+            --notes "APK sideload Pedaree. AAB (Play internal) dan IPA (TestFlight) ada di artefak workflow."
